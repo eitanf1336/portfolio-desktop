@@ -44,6 +44,8 @@ REFRESH_SECS = 60
 COMPACT = (380, 600)
 EXPAND = (1040, 720)
 MARGIN = 22                 # gap from the screen edge
+DRIFT_SECS = 5              # how often we check we are still where we asked to be
+DRIFT_SLACK = 8             # px of WM nudging we tolerate before correcting
 
 sys.path.insert(0, HERE)
 import datafeed
@@ -79,6 +81,8 @@ class Widget:
         self.window_mode = window_mode
         self.expanded = False
         self._want_visible = True    # what the user asked for, not what X reports
+        self._tx = self._ty = None   # where we last asked the WM to put us
+        self._user_placed = False    # he dragged us; stop insisting on the primary
         self.pidfile = PIDFILE_WINDOW if window_mode else PIDFILE
         self.win = Gtk.Window(type=Gtk.WindowType.TOPLEVEL)
         self.win.set_title('Portfolio')
@@ -141,6 +145,7 @@ class Widget:
         self._reposition()
         if not window_mode:
             self._watch_layout()
+            self._start_drift_guard()
             self._write_visible(True)
 
     # ------------------------------------------------------------------ paint
@@ -151,6 +156,18 @@ class Widget:
         return False
 
     # ------------------------------------------------------- geometry / state
+    def _target(self, w):
+        """Top-right of the primary screen — the slot we want to occupy."""
+        disp = self.win.get_display()
+        mon = disp.get_primary_monitor() or disp.get_monitor(0)
+        geo, wa = mon.get_geometry(), mon.get_workarea()
+        x = geo.x + geo.width - w - MARGIN
+        # the shell's top bar owns the first strip of the primary screen and the
+        # WM pushes us below it regardless, so ask for the spot we actually get.
+        # Otherwise every drift check sees a phantom 10px gap and re-moves us.
+        y = max(geo.y + MARGIN, wa.y)
+        return x, y
+
     def _reposition(self):
         w, h = (EXPAND if self.expanded else COMPACT)
         if self.window_mode:
@@ -158,13 +175,10 @@ class Widget:
             self.win.resize(w, h)
             return
         try:
-            disp = self.win.get_display()
-            mon = disp.get_primary_monitor() or disp.get_monitor(0)
-            geo = mon.get_geometry()
-            self._tx = geo.x + geo.width - w - MARGIN
-            self._ty = geo.y + MARGIN
+            self._tx, self._ty = self._target(w)
         except Exception:
             self._tx, self._ty = 1200, MARGIN
+        self._user_placed = False   # we are re-anchoring; any drag is overridden
         self.win.resize(w, h)
         self.win.move(self._tx, self._ty)
         self._publish_geometry(w)
@@ -188,6 +202,58 @@ class Widget:
         except Exception:
             pass
         return False
+
+    # ------------------------------------------------------------- drift guard
+    # Mutter shifts XWayland windows sideways behind our back when a screen
+    # comes or goes: unplug the left monitor and every X coordinate slides one
+    # screen-width left, and nothing slides back on replug. The dock does that
+    # on every warm plug, which is how the widget ended up on the side screen
+    # while its own state file still said it was on the primary. The layout
+    # signals do not fire reliably for it, so stop trusting our bookkeeping and
+    # look at where the window actually is.
+    def _start_drift_guard(self):
+        GLib.timeout_add_seconds(DRIFT_SECS, self._drift_check)
+
+    def _actual_position(self):
+        gw = self.win.get_window()
+        if gw is None:
+            return None
+        try:
+            return gw.get_root_origin()
+        except Exception:
+            return None
+
+    def _on_some_monitor(self, x, y):
+        """Is our top-left corner on a screen that still exists?"""
+        try:
+            disp = self.win.get_display()
+            for i in range(disp.get_n_monitors()):
+                g = disp.get_monitor(i).get_geometry()
+                if g.x <= x < g.x + g.width and g.y <= y < g.y + g.height:
+                    return True
+        except Exception:
+            return True     # can't tell — don't yank a window that may be fine
+        return False
+
+    def _drift_check(self):
+        try:
+            if self._want_visible and self.win.get_visible() and self._tx is not None:
+                pos = self._actual_position()
+                if pos is not None:
+                    x, y = pos
+                    if self._user_placed:
+                        # he put us here on purpose; only rescue us if the screen
+                        # we were dropped on is gone and we are nowhere at all.
+                        if self._on_some_monitor(x, y):
+                            return True
+                        self._user_placed = False
+                    w = (EXPAND if self.expanded else COMPACT)[0]
+                    tx, ty = self._target(w)
+                    if abs(x - tx) > DRIFT_SLACK or abs(y - ty) > DRIFT_SLACK:
+                        self._reposition()
+        except Exception:
+            pass
+        return True     # keep checking
 
     def set_expanded(self, on):
         if on == self.expanded:
@@ -323,6 +389,7 @@ class Widget:
             seat = self.win.get_display().get_default_seat()
             _, x, y = seat.get_pointer().get_position()
             self.win.begin_move_drag(1, x, y, Gtk.get_current_event_time())
+            self._user_placed = True   # drift guard stops dragging us back
         except Exception:
             pass
 
