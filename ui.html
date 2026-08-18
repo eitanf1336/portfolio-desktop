@@ -46,10 +46,21 @@ html,body{height:100%;background:transparent;overflow:hidden;
 /* ----------------------------------------------------------------- header */
 .hdr{display:flex;align-items:center;gap:10px;padding:15px 16px 11px}
 .brand{display:flex;align-items:center;gap:9px;flex:0 0 auto;min-width:0}
+/* The pulse ring must animate ONLY transform/opacity, and must own its
+   compositing layer. It sits inside .panel, which carries
+   backdrop-filter:blur(26px) saturate(1.5) -- and box-shadow is not a
+   compositable property, so animating its spread marked the panel dirty on
+   every frame and made WebKit re-run that 26px blur at 60fps, forever. On an
+   always-on desktop widget that cost ~59% of a CPU core around the clock.
+   transform+opacity on a promoted layer composites instead of repainting, so
+   the backdrop blur is computed once and reused. */
 .spark-dot{width:9px;height:9px;border-radius:50%;background:var(--accent);
-  box-shadow:0 0 0 0 var(--accent);animation:pulse 2.4s infinite}
-@keyframes pulse{0%{box-shadow:0 0 0 0 var(--accent-soft)}
-  70%{box-shadow:0 0 0 9px transparent}100%{box-shadow:0 0 0 0 transparent}}
+  position:relative;z-index:0}
+.spark-dot::after{content:'';position:absolute;inset:-9px;border-radius:50%;
+  background:var(--accent-soft);z-index:-1;
+  will-change:transform,opacity;animation:pulse 2.4s infinite}
+@keyframes pulse{0%{transform:scale(.2);opacity:.9}
+  70%{transform:scale(1);opacity:0}100%{transform:scale(1);opacity:0}}
 .brand h1{font-size:12px;letter-spacing:.22em;font-weight:700;color:var(--dim);
   text-transform:uppercase;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .tools{display:flex;gap:4px}
@@ -124,8 +135,11 @@ html,body{height:100%;background:transparent;overflow:hidden;
 /* ----------------------------------------------------------------- footer */
 .foot{display:flex;align-items:center;gap:8px;padding:9px 16px;
   border-top:1px solid var(--hair);font-size:10.5px;color:var(--faint)}
+/* Same story: the opacity keyframes are cheap, but without its own layer this
+   dot repainted inside the backdrop-filtered panel and re-triggered the blur.
+   The box-shadow here is static, so it is fine to keep. */
 .foot .live{width:6px;height:6px;border-radius:50%;background:var(--pos);
-  box-shadow:0 0 8px var(--pos);animation:blink 2s infinite}
+  box-shadow:0 0 8px var(--pos);will-change:opacity;animation:blink 2s infinite}
 @keyframes blink{50%{opacity:.3}}
 .foot .grow{flex:1}
 
